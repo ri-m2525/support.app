@@ -1,0 +1,1787 @@
+import streamlit as st
+import random
+import json
+import os
+import time
+from datetime import datetime, timedelta
+import calendar
+import pandas as pd
+import plotly.graph_objects as go
+
+is_mobile = st.session_state.get("is_mobile", False)
+
+
+# ==========================================
+# 1. URLパラメータによる自動認証（追加部分）
+# ==========================================
+# URLの末尾にある「?code=xxxx」を取得する
+query_params = st.query_params
+
+# 💡「mysecret2026」の部分を、好きな合言葉（半角の英数字）に変更してください
+SECRET_CODE = "mysecret2026"
+
+if query_params.get("code") != SECRET_CODE:
+    # 正しい合言葉がない場合は、エラー画面を表示してここで処理を完全にストップさせる
+    st.error("🔒 アクセス権限がありません。正しいURLからアクセスしてください。")
+    st.stop()
+
+# ==========================================
+# 1. 基本設定とデータ管理
+# ==========================================
+SAVE_FILE = "routine_supporter_data_v27.json"
+now = datetime.now()
+today_str = datetime.now().strftime("%Y/%m/%d")
+weekdays = ["月", "火", "水", "木", "金", "土", "日"]
+display_date = now.strftime(f"%Y年%m月%d日 ({weekdays[now.weekday()]})")
+
+# 頻度選択肢のマスター
+FREQ_OPTIONS = ["毎日", "平日", "週末", "毎週", "毎月", "3ヶ月ごと", "6ヶ月ごと", "毎年", "1回限り"]
+
+def save_data():
+    data = {
+        "exp_hp": st.session_state.exp_hp,
+        "exp_wisdom": st.session_state.exp_wisdom,
+        "history": st.session_state.history,
+        "routines": st.session_state.routines,
+        "completed_today": st.session_state.completed_today,
+        "last_update": today_str,
+        "exp_limit": st.session_state.exp_limit,
+        "today_earned_exp": st.session_state.today_earned_exp,
+        "streak": st.session_state.streak,
+        "last_streak_date": st.session_state.last_streak_date,
+        "boss_kills": st.session_state.boss_kills,
+        "titles": st.session_state.titles,
+        "login_streak": st.session_state.login_streak
+    }
+    with open(SAVE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+def load_data():
+    if os.path.exists(SAVE_FILE):
+        try:
+            with open(SAVE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            st.warning("⚠️ データが壊れていたため初期化しました")
+            data = {}
+    else:
+        return False
+    if "routines" not in st.session_state:
+        st.session_state.routines = []
+    if "completed_today" not in st.session_state:
+        st.session_state.completed_today = []
+    if "player_hp" not in st.session_state:
+        st.session_state.player_hp = 100  # 初期HP（お好みの数値に調整してください）
+    if "max_hp" not in st.session_state:
+        st.session_state.max_hp = 100     # 最大HP（お好みの数値に調整してください）
+    if "exp_wisdom" not in st.session_state:
+        st.session_state.exp_wisdom = 0 # 初期Wisdom
+    st.session_state.exp_hp = data.get("exp_hp", 0)
+    st.session_state.exp_wisdom = data.get("exp_wisdom", 0)
+    st.session_state.routines = data.get("routines", [])
+    st.session_state.history = data.get(
+        "history",
+        {}
+    )
+    st.session_state.exp_limit = data.get("exp_limit", 100)
+    st.session_state.streak = data.get("streak", 0)
+    st.session_state.last_streak_date = data.get("last_streak_date","")
+    st.session_state.boss_kills = data.get("boss_kills", 0)
+    st.session_state.titles = data.get("titles", [])
+
+    if data.get("last_update", "") != today_str:
+        st.session_state.login_streak = data.get("login_streak", 1)
+            
+            # --- ログインボーナス判定ロジック ---
+    last_date_str = data.get("last_update","")
+
+    if last_date_str != today_str:
+        # 日付が変わった場合のみ判定
+        from datetime import datetime, timedelta
+        try:
+            last_date = datetime.strptime(last_date_str, "%Y/%m/%d")
+            yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y/%m/%d")
+
+            if last_date_str == yesterday_str:
+                # 昨日ログインしていれば継続
+                st.session_state.login_streak += 1
+                st.toast(f"🔥 {st.session_state.login_streak}日連続ログイン！")
+            else:
+                # 1日以上空いたらリセット
+                st.session_state.login_streak = 1
+        except:
+            # 初回やエラー時は1にリセット
+            st.session_state.login_streak = 1
+
+        bonus_exp = 10 + (st.session_state.login_streak * 2)  #3日連続なら16EXP、10日連続なら30EXP
+                
+        # 体力(HP)と知力(Wisdom)に半分ずつ振り分ける
+        st.session_state.exp_hp += (bonus_exp // 2)
+        st.session_state.exp_wisdom += (bonus_exp // 2)
+                
+                # 画面上に通知を出す
+        st.success(f"🎁 ログインボーナス！ {bonus_exp} EXPを獲得しました！")
+
+        # 日付が変わったので今日の進捗をリセット
+        st.session_state.completed_today = []
+        st.session_state.today_earned_exp = 0
+        save_data()
+
+    else:
+        # 同日内の再読み込みなら保存データをそのまま使う
+        st.session_state.completed_today = data.get("completed_today", [])
+        st.session_state.today_earned_exp = data.get("today_earned_exp", 0)
+        return True
+    return False
+
+def reset_game_data():
+
+    if os.path.exists(SAVE_FILE):
+        os.remove(SAVE_FILE)
+
+    st.session_state.exp_hp = 0
+    st.session_state.exp_wisdom = 0
+    st.session_state.routines = []
+    st.session_state.completed_today = []
+    st.session_state.history = {}
+
+    st.session_state.exp_limit = 100
+    st.session_state.today_earned_exp = 0
+
+    st.session_state.streak = 0
+    st.session_state.last_streak_date = ""
+    st.session_state.login_streak = 1
+
+    st.session_state.boss_kills = 0
+    st.session_state.titles = []
+
+    st.session_state.player_hp = 100
+    st.session_state.player_mp = 50
+
+    st.session_state.enemy_hp = 200
+    st.session_state.enemy_max_hp = 200
+    st.session_state.enemy_max_hp = 200
+
+    st.session_state.battle_logs = []
+
+    st.session_state.guard = False
+    st.session_state.enemy_burn = 0
+    st.session_state.ultimate = 0
+    st.session_state.phase2 = False
+
+    st.session_state.screen = "setup"
+
+def reset_level_data():
+    """
+    レベル・経験値・魔王関連のみリセット
+    ミッションや履歴は残す
+    """
+
+    # レベル関連
+    st.session_state.exp_hp = 0
+    st.session_state.exp_wisdom = 0
+
+    # 今日の獲得EXP
+    st.session_state.today_earned_exp = 0
+
+    # 魔王関連
+    st.session_state.boss_kills = 0
+    st.session_state.titles = []
+
+    # バトル状態
+    st.session_state.player_hp = 100
+    st.session_state.player_mp = 50
+
+    st.session_state.enemy_hp = 200
+    st.session_state.enemy_max_hp = 200
+    st.session_state.enemy_max_hp = 200
+
+    st.session_state.battle_logs = []
+
+    st.session_state.guard = False
+    st.session_state.enemy_burn = 0
+    st.session_state.ultimate = 0
+    st.session_state.phase2 = False
+
+    save_data()
+
+
+# ==========================================
+# 2. ロジック関数
+# ==========================================
+
+def give_boss_reward():
+
+    st.session_state.boss_kills += 1
+    reward_exp = 100
+    st.session_state.exp_hp += reward_exp // 2
+    st.session_state.exp_wisdom += reward_exp // 2
+    st.toast(f"🏆 魔王討伐！ +{reward_exp} EXP")
+
+    # 称号判定
+    if st.session_state.boss_kills in TITLE_REWARDS:
+        title = TITLE_REWARDS[st.session_state.boss_kills]
+        if title not in st.session_state.titles:
+            st.session_state.titles.append(title)
+            st.toast(f"👑 称号『{title}』獲得！")
+
+    save_data()
+
+TITLE_REWARDS = {
+    1: "魔王討伐者",
+    5: "王国の英雄",
+    10: "勇者",
+    25: "伝説の勇者",
+    50: "神殺し",
+    100: "世界の守護者"
+}
+
+BOSSES = [
+    {
+        "name": "炎王バルザード",
+        "hp": 250,
+        "skill": "fire"
+    },
+    {
+        "name": "氷帝フロスト",
+        "hp": 180,
+        "skill": "freeze"
+    },
+    {
+        "name": "冥王ネクロス",
+        "hp": 220,
+        "skill": "drain"
+    }
+]
+
+
+def update_streak():
+    today = datetime.now().date()
+
+    if st.session_state.last_streak_date == "":
+        st.session_state.streak = 1
+        st.session_state.last_streak_date = str(today)
+        return
+
+    last_day = datetime.strptime(
+        st.session_state.last_streak_date,
+        "%Y-%m-%d"
+    ).date()
+
+    diff = (today - last_day).days
+
+    if diff == 0:
+        return
+
+    elif diff == 1:
+        st.session_state.streak += 1
+    
+    else:
+        st.session_state.streak = 1
+
+    if st.session_state.streak == 7:
+        st.toast("🏅 7日連続達成！")
+
+    elif st.session_state.streak == 30:
+        st.toast("🥈 30日連続達成！")
+
+    elif st.session_state.streak == 100:
+        st.toast("👑 100日連続達成！")
+
+   
+
+    st.session_state.last_streak_date = str(today)
+
+def handle_complete(r_id, r_type, calc_exp):
+
+    # 成長上限チェック
+    is_unlimited = st.session_state.exp_limit >= 9000
+
+    is_fully_grown = (
+        not is_unlimited and
+        st.session_state.today_earned_exp >= st.session_state.exp_limit
+    )
+
+    actual_add = 0
+
+    if not is_fully_grown:
+
+        actual_add = min(
+            calc_exp,
+            max(0, st.session_state.exp_limit - st.session_state.today_earned_exp)
+        )
+
+        # =========================
+        # レベルアップ判定用
+        # =========================
+        old_hp_lv = (st.session_state.exp_hp // 100) + 1
+        old_wis_lv = (st.session_state.exp_wisdom // 100) + 1
+
+        # EXP加算
+        if r_type == "HP":
+            st.session_state.exp_hp += actual_add
+        else:
+            st.session_state.exp_wisdom += actual_add
+
+        st.session_state.today_earned_exp += actual_add
+
+        # =========================
+        # 新レベル計算
+        # =========================
+        new_hp_lv = (st.session_state.exp_hp // 100) + 1
+        new_wis_lv = (st.session_state.exp_wisdom // 100) + 1
+
+        # =========================
+        # レベルアップ通知
+        # =========================
+        if new_hp_lv > old_hp_lv:
+            st.toast(f"🍏 体力レベルが Lv.{new_hp_lv} に上がった！")
+            time.sleep(1)
+        if new_wis_lv > old_wis_lv:
+            st.toast(f"📘 知力レベルが Lv.{new_wis_lv} に上がった！")
+            time.sleep(1)
+
+    st.session_state.completed_today.append({
+        "id": r_id,
+        "earned": actual_add,
+        "type": r_type
+    })
+
+    # 今日最初の達成だけストリーク判定
+    if len(st.session_state.completed_today) == 1:
+        update_streak()
+
+    task_name = ""
+
+    for r in st.session_state.routines:
+        if r["id"] == r_id:
+            task_name = r["name"]
+            break
+
+    add_history(r_id, task_name, r_type, actual_add)
+        
+    save_data()
+
+def handle_undo(r_id):
+    for idx, item in enumerate(st.session_state.completed_today):
+        if item['id'] == r_id:
+            earned = item.get('earned', 0)
+            if item.get('type') == "HP": st.session_state.exp_hp = max(0, st.session_state.exp_hp - earned)
+            else: st.session_state.exp_wisdom = max(0, st.session_state.exp_wisdom - earned)
+            st.session_state.today_earned_exp = max(0, st.session_state.today_earned_exp - earned)
+            st.session_state.completed_today.pop(idx)
+
+            if today_str in st.session_state.history:
+
+                st.session_state.history[today_str] = [
+                    h
+                    for h in st.session_state.history[today_str]
+                    if h["id"] != r_id
+                ]
+            break
+
+def undo_complete(r_id, r_name, r_type, exp):
+    date_str = datetime.now().strftime("%Y/%m/%d")
+
+    # ① EXPを戻す
+    if r_type == "HP":
+        st.session_state.exp_hp = max(0, st.session_state.exp_hp - exp)
+    else:
+        st.session_state.exp_wisdom = max(0, st.session_state.exp_wisdom - exp)
+
+    # ② 今日の成長を減らす
+    st.session_state.today_earned_exp = max(0, st.session_state.today_earned_exp - exp)
+
+    # ③ completed_todayから削除
+    st.session_state.completed_today = [
+        c for c in st.session_state.completed_today if c["id"] != r_id
+    ]
+
+    # ④ historyから削除（ここが重要）
+    if date_str in st.session_state.history:
+        st.session_state.history[date_str] = [
+            h for h in st.session_state.history[date_str]
+            if h["id"] != r_id
+        ]
+
+    save_data()
+
+def add_history(r_id, task, r_type, exp):
+    date_str = datetime.now().strftime("%Y/%m/%d")
+
+    if date_str not in st.session_state.history:
+        st.session_state.history[date_str] = []
+
+    st.session_state.history[date_str].append({
+        "id": r_id,
+        "task": task,
+        "type": r_type,
+        "exp": exp,
+        "time": datetime.now().strftime("%H:%M")
+    })
+
+
+def enemy_turn(hp_lv):
+
+    # 火傷処理
+    if st.session_state.enemy_burn > 0:
+
+        burn_damage = 15
+
+        st.session_state.enemy_hp -= burn_damage
+
+        st.session_state.enemy_burn -= 1
+
+        st.session_state.battle_logs.insert(
+            0,
+            f"🔥 火傷で {burn_damage} ダメージ"
+        )
+
+    # 魔王行動
+    action = random.choice(
+        [
+            "attack",
+            "attack",
+            "attack",
+            "heal"
+        ]
+    )
+
+    if action == "heal":
+
+        heal = random.randint(30, 60)
+
+        st.session_state.enemy_hp += heal
+
+        st.session_state.battle_logs.insert(
+            0,
+            f"💀 魔王は {heal} 回復した"
+        )
+
+    if random.random() < 0.15:
+
+        dmg = random.randint(35, 50)
+        st.session_state.player_hp -= dmg
+
+        st.session_state.battle_logs.insert(
+            0,
+            f"💀 呪いの一撃！{dmg}（防御無視）"
+        )
+
+        return
+
+    dmg = random.randint(25, 40)
+
+    # 防御状態なら半減
+    if st.session_state.guard:
+
+        dmg = dmg // 2
+
+        st.session_state.guard = False
+
+        st.session_state.battle_logs.insert(
+            0,
+            "🛡️ ダメージを半減！"
+        )
+
+    dmg = max(
+        5,
+        dmg - hp_lv * 3
+    )
+
+    st.session_state.player_hp -= dmg
+
+    st.session_state.battle_logs.insert(
+        0,
+        f"🔥 魔王の攻撃！ {dmg} ダメージ"
+    )
+
+    if st.session_state.phase2:
+
+        extra = random.randint(10, 25)
+
+        st.session_state.player_hp -= extra
+
+        st.session_state.battle_logs.insert(
+            0,
+            f"😈 魔王の追撃！ {extra} ダメージ"
+        )
+
+    save_data()
+
+# ==========================================
+# 3. 初期化
+# ==========================================
+st.set_page_config(page_title="Routine Supporter",layout="wide")
+
+st.markdown("""
+<style>
+
+/* スマホ最適化 */
+@media (max-width:768px){
+
+    .block-container{
+        padding-top:1rem;
+        padding-left:0.5rem;
+        padding-right:0.5rem;
+    }
+
+    h1{
+        font-size:28px !important;
+    }
+
+    h2{
+        font-size:24px !important;
+    }
+
+    h3{
+        font-size:20px !important;
+    }
+
+    button{
+        width:100% !important;
+    }
+
+}
+
+/* PCは横幅を広げる */
+.main .block-container{
+    max-width:1200px;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+if 'exp_hp' not in st.session_state:
+    st.session_state.exp_hp = 0
+    st.session_state.exp_wisdom = 0
+    st.session_state.routines = []
+    st.session_state.completed_today = []
+    st.session_state.history = {}
+    st.session_state.exp_limit = 100
+    st.session_state.today_earned_exp = 0
+    st.session_state.streak = 0
+    st.session_state.last_streak_date = ""
+    st.session_state.login_streak = 1
+    st.session_state.screen = "home"
+    st.session_state.editing_id = None
+    st.session_state.enemy_hp = 200
+    st.session_state.player_hp = 100
+    st.session_state.player_mp = 50
+    st.session_state.battle_logs = []
+    st.session_state.enemy_damage_flag = False
+    st.session_state.boss_kills = 0
+    st.session_state.titles = []
+    st.session_state.guard = False
+    st.session_state.ultimate = 0
+    st.session_state.phase2 = False
+    st.session_state.enemy_burn = 0
+    st.session_state.enemy_name = "魔王"
+    st.session_state.enemy_max_hp = 200
+    st.session_state.enemy_shake = False
+    st.session_state.enemy_damage_time = 0
+    st.session_state.confirm_delete = False
+    st.session_state.confirm_reset_all = False
+    st.session_state.confirm_reset_level = False
+    st.session_state.max_hp = 100
+    load_data() 
+    if 'routines' not in st.session_state:
+        st.session_state.screen = "setup"
+    if 'active_timer' not in st.session_state:
+        st.session_state.active_timer = None
+
+# ==========================================
+# 4. 画面描画
+# ==========================================
+
+# --- A. セットアップ ---
+if st.session_state.screen == "setup":
+    st.title("🌱 冒険の準備")
+    with st.form("setup_form"):
+        n1 = st.text_input("毎日やるミッション1", "運動")
+        n2 = st.text_input("毎日やるミッション2", "学習")
+        if st.form_submit_button("冒険を開始する"):
+            st.session_state.routines = [
+                {"id": 1, "name": n1, "exp": 30, "type": "HP", "is_time": False},
+                {"id": 2, "name": n2, "exp": 30, "type": "Wisdom", "is_time": False}
+            ]
+            st.session_state.screen = "home"; save_data(); st.rerun()
+
+# --- B. ホーム ---
+elif st.session_state.screen == "home":
+    st.write(f"📅 {display_date} | 🔥 {st.session_state.login_streak}日目") # ログイン日数を小さく表示
+    st.title("🏠 ミッション")
+
+    if st.session_state.titles:
+       st.info(
+            f"👑 現在の称号：{st.session_state.titles[-1]}"
+        )
+    # ログインボーナス：連続日数に応じて、その日の成長上限を自動でアップさせる例
+    bonus_limit = (st.session_state.login_streak - 1) * 10
+    total_limit = st.session_state.exp_limit + bonus_limit
+
+    st.info(
+        f"📈 今日の成長: "
+        f"{st.session_state.today_earned_exp} / "
+        f"{'∞' if st.session_state.exp_limit >= 9000 else total_limit}EXP"
+    )
+    if st.session_state.exp_limit < 9000:
+        st.caption(f"(基本目標 {st.session_state.exp_limit} + 連続ボーナス {bonus_limit})")
+                   
+    # 成長上限の状態表示
+    if st.session_state.exp_limit >= 9000:
+        st.success("✨ 現在、成長上限はありません。無限に成長可能です！")
+    elif st.session_state.today_earned_exp >= st.session_state.exp_limit:
+        st.warning(f"🚩 本日の成長限界 ({st.session_state.exp_limit} EXP) に達しました。")
+    
+    hp_lv = (st.session_state.exp_hp // 100) + 1
+    wis_lv = (st.session_state.exp_wisdom // 100) + 1
+    c_st1, c_st2 = st.columns(2)
+    c_st1.metric(f"🍏 体力 Lv.{hp_lv}", f"{st.session_state.exp_hp % 100} / 100 EXP")
+    c_st2.metric(f"📘 知力 Lv.{wis_lv}", f"{st.session_state.exp_wisdom % 100} / 100 EXP")
+
+    col_nav1, col_nav2, col_nav3 = st.columns(3)
+    if col_nav1.button("⚙️ ミッション管理", use_container_width=True):
+        st.session_state.screen = "settings"; st.rerun()
+    if col_nav2.button("⚔️ 魔王に挑戦", type="primary", use_container_width=True):
+        hp_lv = (st.session_state.exp_hp // 100) + 1
+        wis_lv = (st.session_state.exp_wisdom // 100) + 1
+    
+        st.session_state.player_hp = 80 + (hp_lv * 20)
+        st.session_state.player_mp = 40 + (wis_lv * 10)
+    
+        # 【機能追加】魔王のHPをプレイヤーの合計レベルに応じて強化
+        total_lv = hp_lv + wis_lv
+        st.session_state.enemy_hp = 150 + (total_lv * 10) 
+        st.session_state.enemy_max_hp = st.session_state.enemy_hp # バー表示の最大値用
+    
+        st.session_state.battle_logs = [f"🛡️ 魔王(Lv.{total_lv})が立ちはだかっている！"]
+        st.session_state.screen = "game"; st.rerun()
+
+    st.divider()
+    st.subheader("📋 今日のノルマ")
+
+    # 1. 常に最新の「今日」の情報を正確に取得
+    now_live = datetime.now()
+    wd = now_live.weekday()                # 0=月, 6=日
+    today_weekday = weekdays[wd]           # "月"〜"日"
+    today_day = now_live.day               # 1〜31
+    today_month = now_live.month           # 1〜12
+    today_md = now_live.strftime("%m-%d")   # "06-09" 形式
+    week_num = now_live.isocalendar()[1]    # 週番号 (1〜53)
+
+    completed_ids = [item['id'] for item in st.session_state.completed_today]
+
+    # 今日の条件に一致するミッションを抽出
+    todays_missions = []
+    for r in st.session_state.routines:
+        show_flag = False
+        freq = r.get("frequency", "毎日")
+        target = r.get("target_val")
+        
+        if freq == "毎日":
+            show_flag = True
+        elif freq == "平日":
+            show_flag = (wd < 5)
+        elif freq == "週末":
+            show_flag = (wd >= 5)
+        elif freq in ["毎週", "曜日指定"]:
+            if isinstance(target, list):
+                show_flag = (today_weekday in target)
+            elif isinstance(target, str):
+                show_flag = (today_weekday == target)
+        elif freq in ["毎月", "月指定"]:
+            if target is not None:
+                show_flag = (today_day == int(target))
+        elif freq == "3ヶ月ごと":
+            target_day = int(target) if target else 1
+            show_flag = (today_month in [1, 4, 7, 10] and today_day == target_day)
+        elif freq == "6ヶ月ごと":
+            target_day = int(target) if target else 1
+            show_flag = (today_month in [1, 7] and today_day == target_day)
+        elif freq == "毎年":
+            show_flag = (today_md == target)
+        elif freq == "1回限り":
+            show_flag = True
+
+        if show_flag:
+            todays_missions.append(r)
+
+    # リストの仕分け
+    uncompleted_missions = [m for m in todays_missions if m['id'] not in completed_ids]
+    actual_completed_today = [m for m in todays_missions if m['id'] in completed_ids]
+
+    # Streamlitのタブを作成
+    tab_all, tab_uncompleted, tab_completed = st.tabs(["📂 すべて", "⭕ 未完了", "✅ 完了済み"])
+
+    # --------------------------------------------------------
+    # 共通処理：未完了のミッションを1件描画する関数（suffixでkeyの重複を防ぐ）
+    # --------------------------------------------------------
+    def render_uncompleted_item(r, suffix=""):
+        col1, col2, col3 = st.columns([1, 4, 2])
+        with col1:
+            # keyの末尾にタブ固有の識別子（allやuncompleted）を合体させる
+            if st.checkbox("クリア", key=f"check_{r['id']}_{suffix}"):
+                st.session_state.completed_today.append({
+                    "id": r['id'], "name": r['name'], "exp": r['exp'], "type": r['type']
+                })
+                add_history(r["id"], r["name"], r["type"], r["exp"])
+
+                st.session_state.today_earned_exp += r['exp']
+
+                if r['type'] == "HP":
+                    st.session_state.player_hp = min(st.session_state.max_hp, st.session_state.player_hp + r['exp'])
+                    st.session_state.exp_hp += r['exp']
+                else:
+                    st.session_state.exp_wisdom += r['exp']
+
+                save_data()
+                st.toast(f"＋{r['exp']} EXP 獲得！")
+                st.rerun()
+        with col2:
+            badge = "❤️" if r['type'] == "HP" else "🔷"
+            st.markdown(f"**{badge} {r['name']}**")
+        with col3:
+            if r.get("is_time"):
+                if st.button("⏱️ 計測", key=f"time_{r['id']}_{suffix}"):
+                    st.session_state.active_timer = r
+                    st.session_state.screen = "timer"
+                    st.rerun()
+            else:
+                st.caption(f"＋{r['exp']} EXP")
+
+    # --------------------------------------------------------
+    # 共通処理：完了済みのミッションを1件描画する関数（suffixでkeyの重複を防ぐ）
+    # --------------------------------------------------------
+    def render_completed_item(r, suffix=""):
+        col_text, col_btn = st.columns([5, 2])
+        with col_text:
+            st.markdown(f"✅ **{r['name']}** (＋{r['exp']} EXP 獲得済み)")
+        with col_btn:
+            if st.button("↩️ 取り消し", key=f"undo_{r['id']}_{suffix}", use_container_width=True):
+                undo_complete(
+                    r["id"],
+                    r["name"],
+                    r["type"],
+                    r["exp"]
+                )
+                st.toast(f"「{r['name']}」を取り消しました")
+                st.rerun()
+
+    # ==========================================
+    # タブ1: すべて
+    # ==========================================
+    with tab_all:
+        if not todays_missions:
+            st.caption("今日登場するミッションは設定されていません。")
+        else:
+            for r in todays_missions:
+                if r['id'] in completed_ids:
+                    render_completed_item(r, suffix="all") # 💡 keyの末尾に _all を付ける
+                else:
+                    render_uncompleted_item(r, suffix="all")
+
+    # ==========================================
+    # タブ2: 未完了
+    # ==========================================
+    with tab_uncompleted:
+        if not uncompleted_missions:
+            st.success("🎉 今日の未完了ノルマはすべて達成しました！素晴らしい！")
+        else:
+            for r in uncompleted_missions:
+                render_uncompleted_item(r, suffix="uncompleted") # 💡 keyの末尾に _uncompleted を付ける
+
+    # ==========================================
+    # タブ3: 完了済み
+    # ==========================================
+    with tab_completed:
+        if not actual_completed_today:
+            st.caption("完了済みのミッションはまだありません。")
+        else:
+            for r in actual_completed_today:
+                render_completed_item(r, suffix="completed") # 💡 keyの末尾に _completed を付ける
+    if col_nav3.button(
+        "📅 記録",
+        use_container_width=True
+    ):
+        st.session_state.screen = "calendar"
+        st.rerun()
+
+# --- C. 設定・管理 ---
+elif st.session_state.screen == "settings":
+    st.title("⚙️ 設定・管理")
+    if st.button("⬅️ 戻る"): 
+        st.session_state.editing_id = None; st.session_state.screen = "home"; st.rerun()
+    
+    # 判定ロジックと一致する曜日定義
+    weekdays = ["月", "火", "水", "木", "金", "土", "日"]
+    
+    # --- タブ分けでスッキリ整理 ---
+    tab1, tab2 = st.tabs(["➕ ミッションを追加", "📝 既存ミッションの編集・削除"])
+    
+    # ==========================================
+    # タブ1: 新規ミッション追加
+    # ==========================================
+    with tab1:
+        st.subheader("新しいミッションを登録")
+        
+        if "add_success_trigger" not in st.session_state:
+            st.session_state.add_success_trigger = False
+
+        if st.session_state.add_success_trigger:
+            reset_suffix = str(int(time.time()))
+            st.session_state.add_success_trigger = False
+        else:
+            reset_suffix = "default"
+
+        # 1. 基本情報の入力欄（画面描画）
+        new_name = st.text_input("ミッション名", placeholder="例: 英語の単語帳を10ページ進める", key=f"input_mission_name_{reset_suffix}")
+        
+        col_type, col_mode, col_exp = st.columns([2, 2, 2])
+        with col_type:
+            new_type = st.selectbox("タイプ", ["HP", "Wisdom"], key=f"input_mission_type_{reset_suffix}")
+        with col_mode:
+            is_t = st.checkbox("時間計測モード", help="1分＝1EXPになります", key=f"input_mission_is_time_{reset_suffix}")
+        with col_exp:
+            new_ex = st.number_input("固定獲得EXP", min_value=1, max_value=500, value=30, key=f"input_mission_exp_{reset_suffix}", disabled=is_t)
+
+        st.markdown("---")
+
+        # 2. 頻度と詳細の設定エリア
+        st.markdown("##### 📅 登場するタイミング（頻度）の設定")
+        new_freq = st.selectbox("頻度を選択", FREQ_OPTIONS, key=f"new_freq_select_{reset_suffix}")
+        
+        new_target_val = None
+        if new_freq in ["毎週", "曜日指定"]:
+            new_target_val = st.multiselect("対象の曜日を選択してください（複数選択可）", weekdays, default=["月"], key=f"input_mission_weeks_{reset_suffix}")
+        elif new_freq in ["毎月", "月指定", "3ヶ月ごと", "6ヶ月ごと"]:
+            new_target_val = st.number_input("毎月の実行日を指定（1〜31日）", min_value=1, max_value=31, value=1, key=f"input_mission_days_{new_freq}_{reset_suffix}")
+        elif new_freq == "毎年":
+            new_target_val = st.text_input("実行する月日を指定（MM-DD形式）", value="01-01", placeholder="例: 06-09", key=f"input_mission_yearly_{reset_suffix}")
+            
+        st.markdown("---")
+
+        # 3. 確定ボタン専用のフォーム
+        with st.form("add_submit_form"):
+            st.caption("上記の内容で間違いなければ、以下のボタンを押して登録を確定してください。")
+            submit_btn = st.form_submit_button("🔥 この内容でミッションを登録する", use_container_width=True)
+            
+            if submit_btn:
+                if not new_name.strip():
+                    st.error("❌ ミッション名が空欄です。一番上の入力欄に名前を入力してください。")
+                else:
+                    # データを保存
+                    st.session_state.routines.append({
+                        "id": int(time.time()), 
+                        "name": new_name, 
+                        "type": new_type, 
+                        "frequency": new_freq,      
+                        "target_val": new_target_val, 
+                        "is_time": is_t, 
+                        "exp": new_ex
+                    })
+                    save_data()
+                    
+                    st.session_state.add_success_trigger = True
+                    st.success(f"🎉 ミッション「{new_name}」を新しく登録しました！")
+                    st.rerun()
+
+    # ==========================================
+    # タブ2: 既存ミッションの編集・削除
+    # ==========================================
+    with tab2:
+        st.subheader("登録済みのミッション一覧")
+        if not st.session_state.routines:
+            st.info("登録されているミッションはありません。")
+        else:
+            for r in st.session_state.routines:
+                # 編集モードではない通常の表示
+                if st.session_state.editing_id != r['id']:
+                    c1, c2, c3 = st.columns([0.6, 0.2, 0.2])
+                    mode = "時間計測" if r.get('is_time') else f"{r.get('exp')} EXP"
+                    
+                    current_freq = r.get("frequency", "毎日")
+                    target_desc = f" ({r['target_val']})" if r.get("target_val") else ""
+                    
+                    with c1:
+                        st.write(f"**{r['name']}** \n`{r['type']}` / 頻度: `{current_freq}{target_desc}` / {mode}")
+                    with c2:
+                        if st.button("📝 編集", key=f"ed_{r['id']}"): 
+                            st.session_state.editing_id = r['id']
+                            st.rerun()
+                    with c3:
+                        if st.button("🗑️ 削除", key=f"del_{r['id']}", type="primary"):
+                            handle_undo(r['id'])
+                            st.session_state.routines = [ro for ro in st.session_state.routines if ro['id'] != r['id']]
+                            save_data()
+                            st.rerun()
+                            
+                # 📝 編集フォームが開いている時の表示
+                else:
+                    st.markdown(f"##### 🛠️ 「{r['name']}」の編集フォーム")
+                    
+                    # 💡 差分計算のために、変更前の古い値（EXPとタイプ）をキープしておく
+                    old_exp = r.get('exp', 30)
+                    old_type = r.get('type', 'HP')
+                    
+                    with st.form(f"edit_f_{r['id']}"):
+                        edit_name = st.text_input("名前", value=r['name'])
+                        edit_type = st.selectbox("タイプ", ["HP", "Wisdom"], index=0 if r['type']=="HP" else 1)
+                        
+                        current_freq = r.get("frequency", "毎日")
+                        default_freq_idx = FREQ_OPTIONS.index(current_freq) if current_freq in FREQ_OPTIONS else 0
+                        edit_freq = st.selectbox("頻度", FREQ_OPTIONS, index=default_freq_idx, key=f"edit_freq_{r['id']}")
+                        
+                        old_val = r.get("target_val")
+                        edit_target_val = old_val
+                        
+                        if edit_freq in ["毎週", "曜日指定"]:
+                            default_weeks = old_val if isinstance(old_val, list) else ["月"]
+                            edit_target_val = st.multiselect("対象の曜日を選択してください", weekdays, default=default_weeks, key=f"edit_week_{r['id']}")
+                        elif edit_freq in ["毎月", "月指定", "3ヶ月ごと", "6ヶ月ごと"]:
+                            default_day = int(old_val) if (old_val and str(old_val).isdigit()) else 1
+                            edit_target_val = st.number_input("対象の実行日（1〜31日）", min_value=1, max_value=31, value=default_day, key=f"edit_day_{r['id']}")
+                        elif edit_freq == "毎年":
+                            default_md = str(old_val) if old_val else "01-01"
+                            edit_target_val = st.text_input("実行する月日（MM-DD形式）", value=default_md, key=f"edit_md_{r['id']}")
+                        
+                        edit_is_time = st.checkbox("時間計測モード", value=r.get('is_time', False))
+                        edit_exp_val = st.number_input("固定獲得EXP", 1, 500, value=old_exp)
+                        
+                        # 保存とキャンセルの制御
+                        c_save, c_cancel = st.columns(2)
+                        with c_save:
+                            submit_save = st.form_submit_button("💾 保存")
+                        with c_cancel:
+                            submit_cancel = st.form_submit_button("❌ キャンセル")
+                            
+                        if submit_cancel:
+                            st.session_state.editing_id = None
+                            st.rerun()
+                            
+                        if submit_save:
+                            if not edit_name.strip():
+                                st.error("ミッション名を入力してください。")
+                            else:
+                                # 🔄 【重要】今日すでにこのミッションを達成していた場合の同期ロジック
+                                is_completed_today = False
+                                for item in st.session_state.completed_today:
+                                    if item['id'] == r['id']:
+                                        is_completed_today = True
+                                        # 今回の編集による実際の獲得EXPの増減（差分）を計算
+                                        diff = edit_exp_val - old_exp
+                                        
+                                        # 1. 今日の獲得総EXP（上限判定用）の増減
+                                        st.session_state.today_earned_exp = max(0, st.session_state.today_earned_exp + diff)
+                                        
+                                        # 2. 各ステータス（HP/Wisdom）の経験値を反映（タイプが変わった場合も考慮）
+                                        if old_type == edit_type:
+                                            # タイプが変わっていないなら単純に差分を加算
+                                            if edit_type == "HP":
+                                                st.session_state.exp_hp = max(0, st.session_state.exp_hp + diff)
+                                            else:
+                                                st.session_state.exp_wisdom = max(0, st.session_state.exp_wisdom + diff)
+                                        else:
+                                            # タイプが変更された場合は、古いタイプから旧EXPを引いて、新しいタイプに新EXPを足す
+                                            if old_type == "HP":
+                                                st.session_state.exp_hp = max(0, st.session_state.exp_hp - old_exp)
+                                                st.session_state.exp_wisdom = max(0, st.session_state.exp_wisdom + edit_exp_val)
+                                            else:
+                                                st.session_state.exp_wisdom = max(0, st.session_state.exp_wisdom - old_exp)
+                                                st.session_state.exp_hp = max(0, st.session_state.exp_hp + edit_exp_val)
+                                                
+                                        # 3. 今日の達成リスト内のデータ自体も更新
+                                        item['type'] = edit_type
+                                        item['earned'] = edit_exp_val
+                                        break
+                                
+                                # 4. カレンダー等で使う過去ログ（history）の今日のデータも書き換える
+                                current_date_str = datetime.now().strftime("%Y/%m/%d")
+                                if current_date_str in st.session_state.history:
+                                    for h_item in st.session_state.history[current_date_str]:
+                                        if h_item['id'] == r['id']:
+                                            h_item['task'] = edit_name
+                                            h_item['type'] = edit_type
+                                            h_item['exp'] = edit_exp_val
+                                            break
+
+                                # 5. 元のミッションマスターデータを上書き
+                                r['name'] = edit_name
+                                r['type'] = edit_type
+                                r['frequency'] = edit_freq
+                                r['target_val'] = edit_target_val
+                                r['is_time'] = edit_is_time
+                                r['exp'] = edit_exp_val
+                                
+                                st.session_state.editing_id = None
+                                save_data()
+                                
+                                if is_completed_today:
+                                    st.success("変更を保存し、本日の獲得経験値とステータスを同期しました！")
+                                else:
+                                    st.success("変更を保存しました！")
+                                st.rerun()
+                                
+                        if submit_cancel:
+                            st.session_state.editing_id = None
+                            st.rerun()
+        st.divider()
+        st.subheader("📈 成長上限の変更")
+        # 9999を「上限なし」としてスライダーに追加
+        current_val = st.session_state.exp_limit
+        options = [50, 100, 150, 200, 300, 500, 9999]
+        # 現在値がリストにない場合のフォールバック
+        default_idx = options.index(current_val) if current_val in options else 1
+    
+        nlimit = st.select_slider(
+            "1日の基本目標EXP", 
+            options=options, 
+            value=options[default_idx],
+            format_func=lambda x: "成長上限なし" if x == 9999 else f"{x} EXP"
+        )
+
+        if st.button("上限設定を保存"):
+            # 1. スライダーの値を「基本値」として保存
+            st.session_state.exp_limit = nlimit
+            save_data()
+
+            # 2. 現在のログインボーナス分を計算
+            bonus = (st.session_state.login_streak - 1) * 10
+        
+            # 3. メッセージを分かりやすく表示
+            if nlimit == 9999:
+                st.success("設定を「成長上限なし」に更新しました！")
+            else:
+                total = nlimit + bonus
+                st.success(f"設定完了！ 基本 {nlimit} + ボーナス {bonus} = 合計 {total} EXP まで成長できます。")
+
+    
+        st.divider()
+        st.subheader("⚠️ データ初期化")
+
+        col1, col2 = st.columns(2)
+
+# =========================
+# レベルリセット
+# =========================
+        with col1:
+
+            if not st.session_state.confirm_reset_level:
+  
+                if st.button("🧠 レベルのみリセット"):
+                    st.session_state.confirm_reset_level = True
+                    st.rerun()
+
+            else:
+                st.warning("本当にレベルと魔王データをリセットしますか？")
+
+                col_a, col_b = st.columns(2)
+
+                if col_a.button("はい"):
+                    reset_level_data()
+                    st.session_state.confirm_reset_level = False
+                    st.toast("✅ レベルリセット完了")
+                    st.rerun()
+
+                if col_b.button("キャンセル"):
+                    st.session_state.confirm_reset_level = False
+                    st.rerun()
+
+
+# =========================
+# 全リセット
+# =========================
+        with col2:
+
+            if not st.session_state.confirm_reset_all:
+
+                if st.button("💣 全データリセット"):
+                    st.session_state.confirm_reset_all = True
+                    st.rerun()
+
+            else:
+                st.error("⚠️ 本当に全データを削除しますか？")
+
+                col_a, col_b = st.columns(2)
+
+                if col_a.button("はい（全削除）"):
+                    reset_game_data()
+                    st.session_state.confirm_reset_all = False
+                    st.toast("💥 全データ削除完了")
+                    st.rerun()
+
+                if col_b.button("キャンセル"):
+                    st.session_state.confirm_reset_all = False
+                    st.rerun()
+
+
+
+elif st.session_state.screen == "calendar":
+
+    st.title("📅 活動記録")
+
+    if st.button("⬅️ 戻る"):
+        st.session_state.screen = "home"
+        st.rerun()
+
+   # ==========================
+   # GitHub風カレンダー
+   # ==========================
+
+    from datetime import datetime
+
+    # 今年の日付を作成
+    year = datetime.now().year
+    start_date = datetime(year, 1, 1)
+    end_date = datetime(year, 12, 31)
+
+    all_dates = pd.date_range(start_date, end_date)
+
+    weekday_names = ["月", "火", "水", "木", "金", "土", "日"]
+
+   # データ作成
+    calendar_data = []
+
+    for d in all_dates:
+
+        date_str = d.strftime("%Y/%m/%d")
+
+        logs = st.session_state.history.get(date_str, [])
+
+        exp = sum(
+            log.get("exp", 0)
+            for log in logs
+        )
+
+        calendar_data.append(
+            {
+                "date": d,
+                "exp": exp,
+                "weekday": weekday_names[d.weekday()],
+                "week": d.isocalendar().week,
+                "day":d.day
+            }
+        )
+
+    df = pd.DataFrame(calendar_data)
+
+    # --- 週×曜日のカレンダー用に変換 ---
+    df["day"] = df["date"].dt.day
+    df["weekday"] = df["date"].dt.weekday  # 0=Mon
+
+    df["week"] = ((df["date"] - df["date"].min()).dt.days // 7)
+
+    st.subheader("📅 月間カレンダー")
+
+    cols = st.columns(7)
+
+    if is_mobile:
+        st.subheader("📱 週間アクティビティ")
+
+        from datetime import timedelta
+
+        today = datetime.now().date()
+
+    # 直近14日表示（スマホ最適）
+        for i in range(6, -1, -1):
+            d = today - timedelta(days=i)
+            date_str = d.strftime("%Y/%m/%d")
+
+            logs = st.session_state.history.get(date_str, [])
+            exp = sum(l.get("exp", 0) for l in logs)
+
+            weekday = ["月","火","水","木","金","土","日"][d.weekday()]
+
+        # 色レベル
+            if exp == 0:
+                color = "⬜"
+            elif exp < 60:
+                color = "🟩"
+            elif exp < 100:
+                color = "🟨"
+            else:
+                color = "🟥"
+
+        # カードUI
+        with cols[i]:
+            st.markdown(f"""
+            <div style="
+                text-allign:center;
+                padding:10px;
+                border-radius:12px;
+                background:#1e1e1e;
+                border:1px solid #333;
+                min-width:90px;
+            ">
+                <div style="font-size:14px; color:#aaa;">
+                    {d.month}/{d.day} 
+                </div>
+
+                <div style="font-size:18px; font-weight:bold;">
+                    {color} 
+                </div>
+ 
+                <div style="font-size:12px;">
+                    {exp} EXP
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:        
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            year = st.selectbox("年", list(range(2000, 2031)), index=list(range(2000, 2031)).index(datetime.now().year))
+
+        with col2:
+            month = st.selectbox("月", list(range(1, 13)), index=datetime.now().month - 1)
+    
+        cal = calendar.Calendar(firstweekday=0)
+        month_days = cal.monthdatescalendar(year, month)
+
+    # 色レベル定義（EXPに応じて）
+        def get_color(exp):
+            if exp == 0:
+                return "⬜"
+            elif exp < 60:
+                return "🟩"
+            elif exp < 100:
+                return "🟨"
+            else:
+                return "🟥"
+
+        st.markdown("###")
+
+
+        header_cols = st.columns(7)
+
+        for i, wd in enumerate(["月", "火", "水", "木", "金", "土", "日"]):
+            header_cols[i].markdown(
+                f"<div style='text-align:center;font-weight:bold'>{wd}</div>",
+                unsafe_allow_html=True
+            )
+
+        for week in month_days:
+            cols = st.columns(7)
+
+            for i, day in enumerate(week):
+                date_str = day.strftime("%Y/%m/%d")
+                logs = st.session_state.history.get(date_str, [])
+                exp = sum(l.get("exp", 0) for l in logs)
+
+                if day.month != month:
+                    cols[i].markdown("　")
+                    continue
+
+                icon = get_color(exp)
+
+                weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
+                weekday_text = weekday_jp[day.weekday()]
+
+                with cols[i]:
+                    st.markdown(
+                        f"""
+                        <div style="
+                            text-align:center;
+                            padding:6px;
+                            border-radius:8px;
+                            border:1px solid #444;
+                            margin:2px;
+                        ">
+                            <div style="font-size:11px;color:#999;">
+                                {weekday_text}
+                            </div>
+                            <div style="font-size:12px;">{day.day}</div>
+                            <div style="font-size:18px;">{icon}</div>
+                            <div style="font-size:10px;">{exp} EXP</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+    # カレンダー本体
+    for week in month_days:
+
+        for day in week:
+
+            if day.month != month:
+                continue
+
+        date_str = day.strftime("%Y/%m/%d")
+
+        logs = st.session_state.history.get(
+            date_str,
+            []
+        )
+
+        exp = sum(
+            l.get("exp",0)
+            for l in logs
+        )
+
+        if exp == 0:
+            color = "exp0"
+        elif exp < 60:
+            color = "exp1"
+        elif exp < 100:
+            color = "exp2"
+        else:
+            color = "exp3"
+
+   
+
+    st.divider()
+    st.subheader("📜 全履歴")
+
+    selected_date = st.date_input(
+        "日付を選択",
+        datetime.now()
+    )
+
+    date_str = selected_date.strftime(
+        "%Y/%m/%d"
+    )
+
+    records = st.session_state.history.get(
+        date_str,
+        []
+    )
+
+    if not records:
+        st.info("記録なし")
+
+    else:
+
+        total_exp = sum(
+            r["exp"]
+            for r in records
+        )
+
+        st.success(
+            f"{len(records)}件達成 "
+            f"(合計 {total_exp}EXP)"
+        )
+
+        for idx, r in enumerate(records):
+
+            col1, col2 = st.columns(
+                [0.8, 0.2]
+            )
+
+            with col1:
+
+                st.write(
+                    f"✅ {r['task']} "
+                    f"[{r['type']}] "
+                    f"+{r['exp']}EXP "
+                    f"({r['time']})"
+                )
+
+            with col2:
+
+                if st.button(
+                    "🗑️",
+                    key=f"{date_str}_{idx}"
+                ):
+
+                    st.session_state.history[
+                        date_str
+                    ].pop(idx)
+
+                    save_data()
+
+                    st.rerun()
+
+# --- D. バトル（魔法とパンチ） ---
+if st.session_state.screen == "game":
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAppViewContainer"] {
+            background-color: #7a7a7a;
+
+            background-image:
+                linear-gradient(#4a4a4a 2px, transparent 2px),
+                linear-gradient(90deg, #4a4a4a 2px, transparent 2px);
+
+        background-size: 80px 40px;
+
+        background-position: center;
+        }
+
+        .block-container {
+            background: rgba(0,0,0,0.55);
+            border: 3px solid #8b5a2b;
+            border-radius: 12px;
+            padding: 1rem;            
+        }
+
+        /* 全体の文字色 */
+        [data-testid="stAppViewContainer"] {
+            color: #f5f5f5;
+        }
+
+        /* 通常テキスト */
+        p, label, span, div {
+            color: #f5f5f5 !important;
+        }
+
+        /* 見出し */
+        h1, h2, h3, h4, h5 {
+            color: #ffd700 !important;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+        }
+
+        /* メトリクス */
+        [data-testid="stMetric"] {
+            background: rgba(0,0,0,0.3);
+            border-radius: 8px;
+            padding: 10px;
+        }
+
+        /* テキストエリア */
+        textarea {
+            color: white !important;
+            background-color: #222 !important;
+        }
+
+        /* ボタン */
+        .stButton button {
+            color: white !important;
+            font-weight: bold;
+        }
+
+        /* ボタン全体 */
+        .stButton > button {
+            background-color: #8b4513 !important;
+            color: white !important;
+            border: 2px solid #d4af37 !important;
+            border-radius: 10px !important;
+            font-weight: bold !important;
+            font-size: 18px !important;
+            height: 55px !important;
+        }
+
+        /* ホバー時 */
+        .stButton > button:hover {
+            background-color: #a0522d !important;
+            border-color: #ffd700 !important;
+            color: #ffd700 !important;
+        }
+
+        /* 押した時 */
+        .stButton > button:active {
+            background-color: #6b3410 !important;
+        }
+
+
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.title("⚔️ 魔王戦")
+    hp_lv = (st.session_state.exp_hp // 100) + 1
+    wis_lv = (st.session_state.exp_wisdom // 100) + 1
+    m_hp = 80 + (hp_lv * 20)
+    m_mp = 40 + (wis_lv * 10)
+    
+    col_a, col_b = st.columns(2)
+    # =====================================
+# 魔王表示（中央）
+# =====================================
+
+    st.markdown("<h2 style='text-align:center;'>👿 魔王</h2>", unsafe_allow_html=True)
+
+    # 魔王画像
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+            st.image("fantasy_maou_devil.png", use_container_width=True)   
+
+    # 魔王HP
+    # 分母を 200 から st.session_state.enemy_max_hp に変更します
+    max_ehp = st.session_state.get('enemy_max_hp', 200) # 万が一のための安全策
+    
+    st.progress(max(0, st.session_state.enemy_hp) / max_ehp)
+    st.markdown(
+        f"<h4 style='text-align:center;'>HP: {st.session_state.enemy_hp} / {max_ehp}</h4>",
+        unsafe_allow_html=True
+    )
+    
+    st.write("🌟 必殺技ゲージ")
+
+    st.progress(
+        min(
+            st.session_state.ultimate,
+            100
+        ) / 100
+    )
+
+    st.divider()
+
+# =====================================
+# プレイヤーステータス
+# =====================================
+
+    st.markdown("<h3>🧙 あなた</h3>", unsafe_allow_html=True)
+
+    st.write(f"Lv. HP:{hp_lv} / Wisdom:{wis_lv}")
+    hp_col, mp_col = st.columns(2)
+# HPバー
+    with hp_col:
+        st.write("❤️ HP")
+        st.progress(max(0, st.session_state.player_hp) / m_hp)
+        st.write(f"{st.session_state.player_hp} / {m_hp}")
+
+# MPバー
+    with mp_col:
+        st.write("🔷 MP")
+        st.progress(max(0, st.session_state.player_mp) / m_mp)
+        st.write(f"{st.session_state.player_mp} / {m_mp}")
+
+    st.divider()
+    c_atk1, c_atk2 = st.columns(2)
+
+    if st.session_state.ultimate >= 100:
+
+        if st.button(
+            "🌟 覚醒奥義",
+            use_container_width=True
+        ):
+
+            dmg = (
+                150
+                +
+                wis_lv * 10
+            )
+
+            st.session_state.enemy_hp -= dmg
+
+            st.session_state.ultimate = 0
+
+            st.session_state.battle_logs.insert(
+                0,
+                f"🌟 覚醒奥義！ {dmg} ダメージ！"
+            )
+
+            st.rerun()
+    
+    # 魔法攻撃
+    if c_atk1.button("🪄 魔法 (MP:15)", use_container_width=True, disabled=st.session_state.player_mp < 15):
+        st.session_state.player_mp -= 15
+        dmg = random.randint(15+(wis_lv*5), 25+(wis_lv*5))
+        critical = random.random() < 0.15
+
+        if critical:
+            dmg *= 2
+
+            st.session_state.battle_logs.insert(
+                0,
+                f"💥 クリティカル！ {dmg} ダメージ！"
+            )
+        st.session_state.enemy_hp -= dmg
+
+        if (
+            st.session_state.enemy_hp
+            <
+            st.session_state.enemy_max_hp * 0.5
+            and
+            not st.session_state.phase2
+        ):
+
+            st.session_state.phase2 = True
+
+            st.session_state.battle_logs.insert(
+                0,
+                "😈 魔王が本気を出した！！"
+            )
+
+        st.session_state.ultimate += 20
+        st.session_state.enemy_shake = True
+        st.session_state.battle_logs.insert(0, f"🪄 魔法を放った！魔王に {dmg} ダメージ！")
+        st.session_state.enemy_damage_time = time.time()
+        if st.session_state.enemy_hp > 0:
+            e_dmg = max(5, random.randint(30, 45) - (hp_lv * 3))
+            st.session_state.player_hp -= e_dmg
+            st.session_state.battle_logs.insert(0, f"🔥 魔王の反撃！あなたは {e_dmg} ダメージ受けた。")
+        st.rerun()
+
+    # パンチ攻撃（HPを削る）
+    if c_atk2.button("👊 パンチ (HP:10)", use_container_width=True, disabled=st.session_state.player_hp <= 10):
+        st.session_state.player_hp -= 10
+        dmg = random.randint(10+(hp_lv*5), 25+(hp_lv*5))
+        critical = random.random() < 0.15
+
+        if critical:
+            dmg *= 2
+
+            st.session_state.battle_logs.insert(
+                0,
+                f"💥 クリティカル！ {dmg} ダメージ！"
+            )
+
+        st.session_state.enemy_hp -= dmg
+
+        if (
+            st.session_state.enemy_hp
+            <
+            st.session_state.enemy_max_hp * 0.5
+            and
+            not st.session_state.phase2
+        ):
+
+            st.session_state.phase2 = True
+
+            st.session_state.battle_logs.insert(
+                0,
+                "😈 魔王が本気を出した！！"
+            )
+
+        st.session_state.ultimate += 20
+        st.session_state.enemy_shake = True
+        st.session_state.battle_logs.insert(0, f"👊 捨て身のパンチ！魔王に {dmg} ダメージ！")
+        st.session_state.enemy_damage_time = time.time()
+        if st.session_state.enemy_hp > 0:
+            base_damage = random.randint(30,45)
+
+            if st.session_state.phase2:
+                base_damage += 20
+
+            e_dmg = max(5, base_damage - (hp_lv * 3))
+            st.session_state.player_hp -= e_dmg
+            st.session_state.battle_logs.insert(0, f"🔥 魔王の反撃！あなたは {e_dmg} ダメージ受けた。")
+        st.rerun()
+
+    c_skill1, c_skill2 = st.columns(2)
+
+    if c_skill1.button(
+        "✨ ヒール (MP:20)",
+        use_container_width=True
+    ):
+
+        if st.session_state.player_mp >= 20:
+
+            st.session_state.player_mp -= 20
+
+            heal = random.randint(
+                30 + wis_lv * 3,
+                60 + wis_lv * 5
+            )
+
+            st.session_state.player_hp = min(
+                m_hp,
+                st.session_state.player_hp + heal
+            )
+
+            st.session_state.battle_logs.insert(
+                0,
+                f"✨ {heal} 回復した！"
+            )
+
+            enemy_turn(hp_lv)
+
+            st.rerun()
+
+    if c_skill2.button(
+        "🛡️ 防御 (MP:10)",
+        use_container_width=True
+    ):
+
+        if st.session_state.player_mp >= 10:
+
+            st.session_state.player_mp -= 10
+
+            st.session_state.guard = True
+
+            st.session_state.battle_logs.insert(
+                0,
+                "🛡️ 防御態勢！"
+            )
+
+            enemy_turn(hp_lv)
+
+            st.rerun()
+
+    c_skill3, c_skill4 = st.columns(2)
+
+    if c_skill3.button(
+        "🔥 ファイア (HP:25)",
+        use_container_width=True
+    ):
+
+        if st.session_state.player_hp >= 25:
+
+            st.session_state.player_hp -= 25
+
+            dmg = random.randint(
+                10 + wis_lv * 5,
+                35 + wis_lv * 5
+            )
+
+            st.session_state.enemy_hp -= dmg
+
+            st.session_state.enemy_burn = 3
+
+            st.session_state.battle_logs.insert(
+                0,
+                f"🔥 ファイア！ {dmg} ダメージ"
+            )
+
+            enemy_turn(hp_lv)
+
+            st.rerun()
+
+    if c_skill4.button(
+        "💢 捨て身 (HP:20)",
+        use_container_width=True
+    ):
+
+        if st.session_state.player_hp > 20:
+
+            st.session_state.player_hp -= 20
+
+            dmg = random.randint(
+                60 + hp_lv * 10,
+                90 + hp_lv * 12
+            )
+
+            st.session_state.enemy_hp -= dmg
+
+            st.session_state.battle_logs.insert(
+                0,
+                f"💢 捨て身攻撃！ {dmg} ダメージ！"
+            )
+
+            enemy_turn(hp_lv)
+
+            st.rerun()
+
+
+    if st.session_state.enemy_hp <= 0: 
+        give_boss_reward()
+        st.session_state.screen = "victory"; st.rerun()
+    if st.session_state.player_hp <= 0: st.session_state.screen = "defeat"; st.rerun()
+    
+    st.text_area("バトルログ", "\n".join(st.session_state.battle_logs), height=150)
+    if st.button("🏳️ 逃げる"): st.session_state.screen = "home"; st.rerun()
+
+# --- 結末 ---
+elif st.session_state.screen == "victory":
+    st.title("🎉 VICTORY!") 
+    st.success(
+        f"🏆 討伐数: {st.session_state.boss_kills}"
+    )
+
+    if st.session_state.titles:
+
+        st.write("### 👑 称号")
+
+        for t in st.session_state.titles:
+            st.write(f"・{t}")
+    st.balloons(); 
+    st.button("ホームへ戻る", on_click=lambda: setattr(st.session_state, 'screen', 'home'))
+elif st.session_state.screen == "defeat":
+    st.title("💀 DEFEAT"); st.button("出直す", on_click=lambda: setattr(st.session_state, 'screen', 'home'))
+
+
+# バージョン2に更新！
